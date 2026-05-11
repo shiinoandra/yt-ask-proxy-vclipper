@@ -19,7 +19,7 @@ JSON Schema:
 {
   "summary": {
     "main_topics": ["topic1", "topic2"],
-    "overall_summary": "Detailed summary of stream content, atmosphere, progression, and streamer energy."
+    "overall_summary": "Detailed summary of atmosphere, progression, and streamer energy."
   },
   "moments": [
     {

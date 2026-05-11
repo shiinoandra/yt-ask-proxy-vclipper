@@ -36,6 +36,47 @@ class TextLLMGenerationError(TextLLMError):
 
 
 def _build_text_prompt(base_prompt: str, auxiliary_text: str) -> str:
+
+    base_prompt = """\
+Role: Expert VTuber/Gaming Content Analyst.
+Task: Analyze the provided closed caption, live chat, and top comments. using the hint and timestamp
+information youc ould find, recreate and imagine the
+content of the video only with these text information and create a structured JSON report for clip extraction and indexing.
+
+Clip Criteria: Extract moments (max 5m) featuring funny reactions, panic/screams, fails, trolling, high chemistry, or chaotic interactions. Ignore filler.
+
+JSON Schema:
+
+{
+  "summary": {
+    "main_topics": ["topic1", "topic2"],
+    "overall_summary": "Detailed summary of atmosphere, progression, and streamer energy."
+  },
+  "moments": [
+    {
+      "time_begin": "HH:MM:SS",
+      "time_end": "HH:MM:SS",
+      "title": "Short catchy title",
+      "category": "funny|hype|fail|chaotic|etc",
+      "hype_score": 1-10,
+      "desc": "Detailed description of the event.",
+      "why_it_is_interesting": "Explanation of entertainment value.",
+      "clip_context": "Setup/background for the clip."
+    }
+  ]
+}
+
+Constraint Checklist (CRITICAL):
+
+- Language: Handle JP, EN, and internet slang accurately.
+- Timestamps: Must be HH:MM:SS and chronological.
+- Format: Output ONLY the raw JSON object.
+- No Prose: Do not include markdown code fences (```json), intro text, or outro explanations.
+- Max Duration: 5 minutes per clip.
+- Min number of clip/moments : 5
+
+
+"""
     """Build a prompt that instructs the LLM to analyze text-only data.
 
     The base prompt (e.g. the VTuber analysis template) is preserved,

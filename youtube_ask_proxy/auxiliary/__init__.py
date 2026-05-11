@@ -32,6 +32,9 @@ def _extract_video_id(video_url: str) -> str:
 def fetch_captions(video_url: str) -> str | None:
     """Fetch caption/transcript text for a YouTube video.
 
+    Compatible with ``youtube-transcript-api`` v1.x where ``fetch()`` and
+    ``list()`` are instance methods that take ``video_id`` as an argument.
+
     Args:
         video_url: Full YouTube video URL.
 
@@ -44,38 +47,43 @@ def fetch_captions(video_url: str) -> str | None:
         video_id = _extract_video_id(video_url)
         logger.info("Fetching captions", video_id=video_id)
 
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # v1.x API: create instance (no args), then pass video_id to methods
+        ytta = YouTubeTranscriptApi()
 
-        # Priority: manual captions > generated captions > translated
-        transcript = None
+        # Try to list available transcripts and pick the best one
+        entries: list[dict[str, Any]] = []
         try:
-            # Try English first
-            transcript = transcript_list.find_transcript(["en"])
+            transcript_list = ytta.list(video_id)
+            # Priority: English first, then any other language
+            selected = None
+            for t in transcript_list:
+                if getattr(t, "language_code", None) == "en":
+                    selected = t
+                    break
+            if selected is None and transcript_list:
+                selected = transcript_list[0]
+
+            if selected is not None:
+                fetched = selected.fetch()
+                # FetchedTranscript is iterable of FetchedTranscriptSnippet
+                entries = list(fetched)
         except Exception:
-            pass
-
-        if transcript is None:
+            # Fallback: try direct fetch (grabs best available)
             try:
-                # Try any available transcript
-                transcript = transcript_list.find_generated_transcript(["en", "ja"])
+                fetched = ytta.fetch(video_id)
+                entries = list(fetched)
             except Exception:
                 pass
 
-        if transcript is None:
-            try:
-                # Fallback: first available transcript
-                transcript = next(iter(transcript_list))
-            except Exception:
-                pass
-
-        if transcript is None:
+        if not entries:
             logger.warning("No captions available", video_id=video_id)
             return None
 
-        entries = transcript.fetch()
         lines: list[str] = []
         for entry in entries:
-            text = entry.get("text", "").strip()
+            # FetchedTranscriptSnippet has a .text attribute
+            text = getattr(entry, "text", "") or ""
+            text = text.strip()
             if text:
                 lines.append(text)
 
