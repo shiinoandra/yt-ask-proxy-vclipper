@@ -13,6 +13,28 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def _make_valid_response(text: str) -> dict:
+    """Return a properly structured response that passes is_empty_or_error."""
+    return {
+        "summary": {
+            "main_topics": ["Topic 1"],
+            "overall_summary": text,
+        },
+        "moments": [
+            {
+                "time_begin": "00:01:00",
+                "time_end": "00:02:00",
+                "title": "Moment 1",
+                "category": "funny",
+                "hype_score": 7,
+                "desc": "A moment",
+                "why_it_is_interesting": "Because",
+                "clip_context": "Context",
+            }
+        ],
+    }
+
+
 class TestListModels:
     def test_list_models(self, client: TestClient) -> None:
         response = client.get("/v1/models")
@@ -39,7 +61,7 @@ class TestChatCompletions:
     def test_with_video_url_in_message(
         self, mock_playwright: AsyncMock, mock_aux: AsyncMock, client: TestClient
     ) -> None:
-        mock_playwright.return_value = {"response": "This is a summary."}
+        mock_playwright.return_value = _make_valid_response("This is a summary.")
         mock_aux.return_value = None
 
         payload = {
@@ -64,7 +86,7 @@ class TestChatCompletions:
     def test_stream_response(
         self, mock_playwright: AsyncMock, mock_aux: AsyncMock, client: TestClient
     ) -> None:
-        mock_playwright.return_value = {"response": "Streamed result."}
+        mock_playwright.return_value = _make_valid_response("Streamed result.")
         mock_aux.return_value = None
 
         payload = {
@@ -97,7 +119,7 @@ class TestChatCompletions:
     ) -> None:
         """Test that Gemini is used when Playwright fails."""
         mock_playwright.return_value = None  # Playwright fails
-        mock_gemini.return_value = {"response": "Gemini fallback result."}
+        mock_gemini.return_value = _make_valid_response("Gemini fallback result.")
         mock_aux.return_value = None
 
         payload = {
@@ -129,7 +151,7 @@ class TestChatCompletions:
         """Test that auxiliary text is used when both Playwright and Gemini fail."""
         mock_playwright.return_value = None
         mock_gemini.return_value = None
-        mock_aux.return_value = {"response": "Auxiliary fallback result."}
+        mock_aux.return_value = _make_valid_response("Auxiliary fallback result.")
 
         payload = {
             "model": "youtube-ask-proxy",

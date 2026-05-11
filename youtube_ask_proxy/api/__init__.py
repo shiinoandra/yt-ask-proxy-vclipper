@@ -428,19 +428,22 @@ async def create_chat_completion(
     aux_result = await aux_task
 
     # Determine final result
-    if base_result is not None and aux_result is not None:
+    base_valid = base_result is not None and not is_empty_or_error(base_result)
+    aux_valid = aux_result is not None and not is_empty_or_error(aux_result)
+
+    if base_valid and aux_valid:
         # Enrichment: merge auxiliary into base
         logger.info("Merging base result with auxiliary enrichment")
         result = merge_responses(base_result, aux_result, enrichment_mode=True)
-    elif base_result is not None:
-        # Only base succeeded
+    elif base_valid:
+        # Only base succeeded (auxiliary empty/failed)
         result = base_result
-    elif aux_result is not None:
-        # Only auxiliary succeeded (last-resort fallback)
+    elif aux_valid:
+        # Only auxiliary succeeded (base empty/failed)
         logger.info("Using auxiliary result as standalone fallback")
         result = aux_result
     else:
-        # All methods failed
+        # All methods failed or returned empty/error wrappers
         logger.error("All methods failed; returning unavailable response")
         return _build_unavailable_response(request.model or settings.default_model, prompt)
 
@@ -465,11 +468,14 @@ async def _stream_chat_completion(
     base_result = await base_task
     aux_result = await aux_task
 
-    if base_result is not None and aux_result is not None:
+    base_valid = base_result is not None and not is_empty_or_error(base_result)
+    aux_valid = aux_result is not None and not is_empty_or_error(aux_result)
+
+    if base_valid and aux_valid:
         result = merge_responses(base_result, aux_result, enrichment_mode=True)
-    elif base_result is not None:
+    elif base_valid:
         result = base_result
-    elif aux_result is not None:
+    elif aux_valid:
         result = aux_result
     else:
         result = {
