@@ -79,17 +79,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     logger.info("Application starting up", version="0.2.0")
 
-    # Pre-launch browser to fail fast on config issues (only if Gemini is not
-    # configured, since Playwright will be the primary method in that case).
-    if not settings.gemini_api_key:
-        try:
-            await _get_browser_controller()
-            logger.info("Browser controller pre-launched successfully")
-        except Exception as e:
-            logger.error("Failed to pre-launch browser controller", error=str(e))
-            # Don't raise — allow API to start, but requests will fail gracefully
-    else:
-        logger.info("Gemini API configured; browser controller lazy-loaded on first request")
+    # Pre-launch browser since Playwright is the primary summarization engine.
+    try:
+        await _get_browser_controller()
+        logger.info("Browser controller pre-launched successfully")
+    except Exception as e:
+        logger.error("Failed to pre-launch browser controller", error=str(e))
+        # Don't raise — allow API to start, requests will fall back to Gemini or degrade gracefully.
 
     yield
 
@@ -103,7 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="YouTube Ask Proxy API",
-    description="OpenAI-compatible API proxy for YouTube video summarization via Gemini API (primary) and browser automation (fallback).",
+    description="OpenAI-compatible API proxy for YouTube video summarization via YouTube Ask browser automation (primary) and Gemini API (fallback).",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -231,43 +227,19 @@ def _build_unavailable_response(
         "error": True,
         "message": "Summarization is not available for this video.",
         "details": (
-            "The video may not be accessible, the Gemini API key is invalid, "
-            "the Ask feature is not enabled for this video, or the service "
-            "is temporarily unavailable. Please try again later or with a different video."
+            "The video may not be accessible, the Ask feature is not enabled, "
+            "or the service is temporarily unavailable. Please try again later "
+            "or with a different video."
         ),
     }
     return _build_completion_response(fallback_content, model, prompt)
-
-
-async def _summarize_with_gemini(
-    video_url: str,
-    prompt: str,
-) -> dict[str, object] | None:
-    """Try to summarize via Gemini API. Returns None on failure so caller can fall back."""
-    if not settings.gemini_api_key or not settings.gemini_enabled:
-        logger.debug("Gemini API not configured or disabled, skipping")
-        return None
-
-    try:
-        result = await summarize_video(video_url, prompt)
-        logger.info("Gemini summarization succeeded")
-        return result
-    except GeminiNotConfiguredError:
-        logger.warning("Gemini API key not configured")
-        return None
-    except GeminiSummarizationError as exc:
-        logger.warning("Gemini summarization failed", error=str(exc))
-        return None
-    except Exception as exc:
-        logger.warning("Unexpected Gemini error", error=str(exc))
-        return None
 
 
 async def _summarize_with_playwright(
     video_url: str,
     prompt: str,
 ) -> dict[str, object] | None:
-    """Try to summarize via Playwright / YouTube Ask. Returns None on failure."""
+    """Try to summarize via Playwright / YouTube Ask. Returns None on failure so caller can fall back."""
     try:
         controller = await _get_browser_controller()
         result = await controller.ask(video_url, prompt)
@@ -287,6 +259,30 @@ async def _summarize_with_playwright(
         return None
     except Exception as exc:
         logger.warning("Unexpected Playwright error", error=str(exc))
+        return None
+
+
+async def _summarize_with_gemini(
+    video_url: str,
+    prompt: str,
+) -> dict[str, object] | None:
+    """Try to summarize via Gemini API. Returns None on failure."""
+    if not settings.gemini_api_key or not settings.gemini_enabled:
+        logger.debug("Gemini API not configured or disabled, skipping")
+        return None
+
+    try:
+        result = await summarize_video(video_url, prompt)
+        logger.info("Gemini summarization succeeded")
+        return result
+    except GeminiNotConfiguredError:
+        logger.warning("Gemini API key not configured")
+        return None
+    except GeminiSummarizationError as exc:
+        logger.warning("Gemini summarization failed", error=str(exc))
+        return None
+    except Exception as exc:
+        logger.warning("Unexpected Gemini error", error=str(exc))
         return None
 
 
@@ -320,8 +316,9 @@ async def create_chat_completion(
     """Create a chat completion (OpenAI-compatible).
 
     Strategy:
-        1. Try Gemini API first (fast, no browser needed).
-        2. If Gemini fails or is not configured, fall back to Playwright / YouTube Ask.
+        1. Try Playwright / YouTube Ask first (fast, high-quality, ~10-20s).
+        2. If Playwright fails (Ask not available, timeout, auth issue),
+           fall back to Gemini API.
         3. If both fail, return a graceful "unavailable" message.
     """
     prompt, video_url = build_ask_prompt(request.messages, request.video_url)
@@ -339,17 +336,17 @@ async def create_chat_completion(
             media_type="text/event-stream",
         )
 
-    # Phase 1: Gemini API (primary)
-    result = await _summarize_with_gemini(video_url, prompt)
+    # Phase 1: Playwright / YouTube Ask (primary)
+    result = await _summarize_with_playwright(video_url, prompt)
 
-    # Phase 2: Playwright fallback
+    # Phase 2: Gemini API fallback
     if result is None:
-        logger.info("Gemini failed or unavailable, falling back to Playwright")
-        result = await _summarize_with_playwright(video_url, prompt)
+        logger.info("Playwright failed, falling back to Gemini API")
+        result = await _summarize_with_gemini(video_url, prompt)
 
     # Phase 3: Graceful degradation
     if result is None:
-        logger.error("Both Gemini and Playwright failed; returning unavailable response")
+        logger.error("Both Playwright and Gemini failed; returning unavailable response")
         return _build_unavailable_response(request.model or settings.default_model, prompt)
 
     return _build_completion_response(result, request.model or settings.default_model, prompt)
@@ -362,16 +359,16 @@ async def _stream_chat_completion(
 ) -> AsyncIterator[str]:
     """Stream chat completion responses as Server-Sent Events.
 
-    Note: Since neither Gemini nor YouTube Ask natively stream tokens,
+    Note: Since neither YouTube Ask nor Gemini natively stream tokens,
     we simulate streaming by yielding the full response as a single chunk.
     """
-    result = await _summarize_with_gemini(video_url, prompt)
-    method = "gemini"
+    result = await _summarize_with_playwright(video_url, prompt)
+    method = "playwright"
 
     if result is None:
-        logger.info("Gemini failed or unavailable, falling back to Playwright (stream)")
-        result = await _summarize_with_playwright(video_url, prompt)
-        method = "playwright"
+        logger.info("Playwright failed, falling back to Gemini API (stream)")
+        result = await _summarize_with_gemini(video_url, prompt)
+        method = "gemini"
 
     if result is None:
         logger.error("Both methods failed; returning unavailable response (stream)")
@@ -379,9 +376,8 @@ async def _stream_chat_completion(
             "error": True,
             "message": "Summarization is not available for this video.",
             "details": (
-                "The video may not be accessible, the Gemini API key is invalid, "
-                "the Ask feature is not enabled for this video, or the service "
-                "is temporarily unavailable."
+                "The video may not be accessible, the Ask feature is not enabled, "
+                "or the service is temporarily unavailable."
             ),
         }
 
@@ -422,84 +418,3 @@ async def _stream_chat_completion(
     )
     yield f"data: {final_chunk.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
-
-
-# ---------------------------------------------------------------------------
-# Test / Comparison Endpoints
-# ---------------------------------------------------------------------------
-
-from pydantic import BaseModel
-
-
-class _TestSummarizeRequest(BaseModel):
-    """Request body for test comparison endpoints."""
-
-    video_url: str
-    prompt: str | None = None
-
-
-class _TestSummarizeResponse(BaseModel):
-    """Response from a test comparison endpoint."""
-
-    method: str
-    success: bool
-    content: dict[str, object] | None = None
-    error: str | None = None
-    duration_ms: int
-
-
-@app.post("/v1/test/gemini", response_model=_TestSummarizeResponse)
-async def test_gemini(
-    request: _TestSummarizeRequest,
-    _: None = Security(_verify_api_key),
-) -> _TestSummarizeResponse:
-    """Test summarization using the Gemini API only."""
-    import time
-
-    start = time.time()
-    prompt = request.prompt or build_ask_prompt([], request.video_url)[0]
-
-    try:
-        result = await summarize_video(request.video_url, prompt)
-        return _TestSummarizeResponse(
-            method="gemini",
-            success=True,
-            content=result,
-            duration_ms=int((time.time() - start) * 1000),
-        )
-    except Exception as exc:
-        return _TestSummarizeResponse(
-            method="gemini",
-            success=False,
-            error=str(exc),
-            duration_ms=int((time.time() - start) * 1000),
-        )
-
-
-@app.post("/v1/test/playwright", response_model=_TestSummarizeResponse)
-async def test_playwright(
-    request: _TestSummarizeRequest,
-    _: None = Security(_verify_api_key),
-) -> _TestSummarizeResponse:
-    """Test summarization using Playwright / YouTube Ask only."""
-    import time
-
-    start = time.time()
-    prompt = request.prompt or build_ask_prompt([], request.video_url)[0]
-
-    try:
-        controller = await _get_browser_controller()
-        result = await controller.ask(request.video_url, prompt)
-        return _TestSummarizeResponse(
-            method="playwright",
-            success=True,
-            content=result,
-            duration_ms=int((time.time() - start) * 1000),
-        )
-    except Exception as exc:
-        return _TestSummarizeResponse(
-            method="playwright",
-            success=False,
-            error=str(exc),
-            duration_ms=int((time.time() - start) * 1000),
-        )

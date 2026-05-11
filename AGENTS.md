@@ -43,7 +43,8 @@ python -m youtube_ask_proxy auth
 | `logging/` | Structured logging via `structlog` |
 | `models/` | OpenAI-compatible Pydantic request/response types |
 | `api/` | FastAPI app, endpoints, error handlers |
-| `browser/` | Playwright lifecycle + YouTube Ask DOM interaction |
+| `browser/` | Playwright lifecycle + YouTube Ask DOM interaction (PRIMARY) |
+| `gemini/` | Google GenAI SDK client for video summarization (FALLBACK) |
 | `auth/` | Cookie/session persistence for Google auth |
 | `prompts/` | Build prompts from OpenAI chat messages, extract video URLs |
 | `parsers/` | Parse raw DOM text -> structured JSON (markdown strip, JSON repair) |
@@ -109,9 +110,17 @@ See `config/settings.py` for the full schema. Key variables:
 
 ---
 
+## Engine Architecture
+
+**PRIMARY:** Playwright / YouTube Ask (~15s avg, 80% success rate)
+**FALLBACK:** Gemini API (`google-genai`, ~155s avg, 40% success rate)
+
+The API tries Playwright first. If it fails (Ask button not found, timeout, auth issue), it automatically falls back to Gemini. If both fail, it returns a graceful "unavailable" JSON response. See `COMPARISON.md` for benchmark data.
+
 ## Known Limitations
 
 - YouTube Ask feature availability varies by video, region, and account
 - DOM selectors may need updates when YouTube changes their UI
 - Streaming is simulated (single chunk) because YouTube Ask does not natively stream
 - Google's bot detection can still block auth on some IPs/fingerprints despite stealth patches
+- Gemini API may fail on long videos (> ~1 hour) due to frame-extraction limits

@@ -1,6 +1,6 @@
 # YouTube Ask Proxy API
 
-> **OpenAI-compatible REST API for YouTube video summarization powered by Gemini API (primary) and YouTube Ask browser automation (fallback).**
+> **OpenAI-compatible REST API for YouTube video summarization powered by YouTube Ask browser automation (primary) and Gemini API (fallback).**
 
 ---
 
@@ -29,17 +29,19 @@ YouTube's **Ask** feature is a powerful AI-driven video Q&A tool, but Google doe
 
 This project bridges that gap with a **dual-engine architecture**:
 
-### Primary: Gemini API
-The fastest and most reliable method. Uses Google's **Gemini API** (`google-genai` SDK) to send YouTube video URLs directly to Gemini as video parts (`Part.from_uri`). Gemini natively ingests the video content — no browser automation, no authentication, no DOM parsing. Results typically return in **5–15 seconds**.
+### Primary: YouTube Ask via Playwright
+The fastest and most reliable method. Uses **Playwright** to drive a real Chromium instance, navigate to YouTube, open the Ask panel, submit the prompt, and extract the AI response from the DOM. YouTube's Ask feature leverages Google's pre-built video index (captions, chapters, engagement signals), so results typically return in **10–20 seconds** with high accuracy.
 
-### Fallback: YouTube Ask via Playwright
-When Gemini is unavailable, the API transparently falls back to **browser automation** using Playwright. This drives a real Chromium instance to navigate to YouTube, open the Ask panel, submit the prompt, and extract the response from the DOM.
+### Fallback: Gemini API
+When YouTube Ask is unavailable (not enabled for the video, auth expired, etc.), the API transparently falls back to **Google's Gemini API** (`google-genai` SDK). Gemini processes the video directly via `Part.from_uri()`, which is slower (~20–300s) and may fail on very long videos, but covers videos where Ask is not enabled.
 
 ### Key Benefits
-1. **Speed** — Gemini API responses arrive in seconds vs. 60–120s for browser automation.
-2. **Reliability** — No dependency on YouTube's DOM structure, auth state, or Ask feature availability.
-3. **Graceful degradation** — If Gemini fails (API key missing, rate limit, video unsupported), the system automatically falls back to Playwright. If both fail, it returns a clean "unavailable" message instead of crashing.
+1. **Speed** — YouTube Ask averages **15.8s** vs Gemini's **154.7s** (10× faster).
+2. **Reliability** — Playwright succeeds on **80%** of videos vs Gemini's **40%**; combined they cover **100%**.
+3. **Graceful degradation** — If Playwright fails (Ask not enabled), Gemini tries. If both fail, a clean "unavailable" message is returned.
 4. **OpenAI-compatible REST API** — Any client that speaks `/v1/chat/completions` can use it without code changes.
+
+> See [COMPARISON.md](COMPARISON.md) for the full benchmark data and methodology.
 
 ---
 
@@ -50,8 +52,8 @@ When Gemini is unavailable, the API transparently falls back to **browser automa
 | **Language** | Python 3.10+ | Core runtime |
 | **Web Framework** | FastAPI | OpenAI-compatible HTTP API |
 | **Server** | Uvicorn | ASGI server with WebSocket support |
-| **Primary LLM** | Gemini API (`google-genai`) | Native video summarization via `Part.from_uri` |
-| **Fallback LLM** | Playwright (async) | Browser automation for YouTube Ask |
+| **Primary LLM** | Playwright (async) | Browser automation for YouTube Ask |
+| **Fallback LLM** | Gemini API (`google-genai`) | Native video summarization via `Part.from_uri` |
 | **Data Validation** | Pydantic v2 | Request/response models, settings |
 | **Settings** | Pydantic-Settings | `.env`/environment configuration |
 | **Logging** | structlog + python-json-logger | Structured JSON or console logs |
@@ -61,7 +63,7 @@ When Gemini is unavailable, the API transparently falls back to **browser automa
 | **Linting** | ruff | Formatting & linting |
 | **Testing** | pytest, pytest-asyncio | Unit tests |
 
-**Browser:** Chromium (via Playwright). Only needed when Gemini is unavailable or disabled.
+**Browser:** Chromium (via Playwright). Always pre-launched at startup since it's the primary engine.
 
 ---
 
@@ -90,16 +92,17 @@ When Gemini is unavailable, the API transparently falls back to **browser automa
       |           |
       v           v
 +-------------------------+     +-------------------------+
-|   Gemini API Client     |     |  Browser Controller     |
-|  (google-genai SDK)     |     |  (Playwright -> Chrome) |
-|  - Part.from_uri(video) |     |  - Navigate to video    |
-|  - Send prompt          |     |  - Poll for Ask UI      |
-|  - Receive JSON         |     |  - Submit & extract     |
+|  Browser Controller     |     |   Gemini API Client     |
+|  (Playwright -> Chrome) |     |  (google-genai SDK)     |
+|  - Navigate to video    |     |  - Part.from_uri(video) |
+|  - Poll for Ask UI      |     |  - Send prompt          |
+|  - Submit & extract     |     |  - Receive JSON         |
 +-----------+-------------+     +-----------+-------------+
             |                               |
-            |  (fallback on failure)        |
-            |<------------------------------+
-            v
+            |         (fallback)            |
+            +---------->+<------------------+
+                        |
+                        v
 +-------------------------+
 |   Response Parser       |
 |   - Strip markdown      |
@@ -615,66 +618,6 @@ data: [DONE]
 ```
 
 > **Note:** Streaming is **simulated** (single chunk) because neither Gemini nor YouTube Ask natively stream tokens. The full response is returned in one SSE event, followed by a `[DONE]` terminator.
-
----
-
-### Test / Comparison Endpoints
-
-During evaluation you can call each backend independently to compare speed and quality.
-
-#### `POST /v1/test/gemini`
-
-Tests **only** the Gemini API path.
-
-```bash
-curl -s http://localhost:8000/v1/test/gemini \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-youtube-proxy-secret" \
-  -d '{
-    "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
-    "prompt": "Summarize this video and extract highlights"
-  }' | jq .
-```
-
-**Response:**
-
-```json
-{
-  "method": "gemini",
-  "success": true,
-  "content": { "summary": { ... }, "moments": [ ... ] },
-  "error": null,
-  "duration_ms": 8432
-}
-```
-
-#### `POST /v1/test/playwright`
-
-Tests **only** the Playwright / YouTube Ask path.
-
-```bash
-curl -s http://localhost:8000/v1/test/playwright \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-youtube-proxy-secret" \
-  -d '{
-    "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
-    "prompt": "Summarize this video and extract highlights"
-  }' | jq .
-```
-
-**Response:**
-
-```json
-{
-  "method": "playwright",
-  "success": true,
-  "content": { "summary": { ... }, "moments": [ ... ] },
-  "error": null,
-  "duration_ms": 67890
-}
-```
-
-> These endpoints are useful for A/B testing. Once you validate that Gemini meets your quality bar, you can rely on the main `/v1/chat/completions` endpoint which uses Gemini automatically.
 
 ---
 
