@@ -153,6 +153,23 @@ class Settings(BaseSettings):
         default=120000, ge=5000, description="Timeout for OpenAI-compatible API in ms"
     )
 
+    # Auxiliary Data Sources
+    auxiliary_timeout: int = Field(
+        default=180,
+        ge=5,
+        description="Max seconds to wait for auxiliary data (captions/comments/chat) download",
+    )
+    auxiliary_sources: str = Field(
+        default="captions,comments,live_chat",
+        description="Comma-separated list of auxiliary sources to use: captions,comments,live_chat",
+    )
+    auxiliary_max_comments: int = Field(
+        default=30, ge=1, le=500, description="Max comments to fetch per video"
+    )
+    auxiliary_max_chat_messages: int = Field(
+        default=500, ge=1, le=2000, description="Max live chat messages to fetch per video"
+    )
+
     # Prompting
     prompt_template: str | None = Field(
         default=None,

@@ -11,9 +11,15 @@ import asyncio
 import re
 from typing import Any
 
+from youtube_ask_proxy.config import settings
 from youtube_ask_proxy.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _get_enabled_sources() -> set[str]:
+    """Return the set of enabled auxiliary sources from config."""
+    return {s.strip().lower() for s in settings.auxiliary_sources.split(",")}
 
 
 def _extract_video_id(video_url: str) -> str:
@@ -52,7 +58,7 @@ def fetch_captions(video_url: str) -> str | None:
         ytta = YouTubeTranscriptApi()
 
         # Try to list available transcripts and pick the best one
-        entries: list[dict[str, Any]] = []
+        entries: list[Any] = []
         try:
             transcript_list = ytta.list(video_id)
             # Priority: English first, then any other language
@@ -313,9 +319,21 @@ def build_auxiliary_context(
     }
 
 
+def _task_result(task: asyncio.Future) -> Any:
+    """Safely get the result of a future/task, handling cancellation."""
+    if not task.done():
+        return None
+    try:
+        return task.result()
+    except asyncio.CancelledError:
+        return None
+    except Exception:
+        return None
+
+
 async def fetch_all_auxiliary_data(
     video_url: str,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Fetch all available auxiliary data for a video.
 
@@ -328,37 +346,66 @@ async def fetch_all_auxiliary_data(
     Args:
         video_url: YouTube video URL.
         timeout_seconds: Max time to wait for all auxiliary downloads.
+            Defaults to ``settings.auxiliary_timeout`` (180s).
 
     Returns:
         Context dict from :func:`build_auxiliary_context`.
     """
+    timeout = timeout_seconds or settings.auxiliary_timeout
+    enabled = _get_enabled_sources()
+
     logger.info(
         "Fetching auxiliary data",
         video_url=video_url,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout,
+        enabled_sources=list(enabled),
     )
 
     # Run blocking functions in threads so the event loop stays free
     loop = asyncio.get_event_loop()
-    captions_task = loop.run_in_executor(None, fetch_captions, video_url)
-    live_chat_task = loop.run_in_executor(None, fetch_live_chat, video_url)
-    comments_task = loop.run_in_executor(None, fetch_top_comments, video_url)
+    tasks: list[asyncio.Future] = []
+
+    if "captions" in enabled:
+        tasks.append(loop.run_in_executor(None, fetch_captions, video_url))
+    else:
+        tasks.append(asyncio.Future())  # Placeholder
+        tasks[-1].set_result(None)
+
+    if "live_chat" in enabled:
+        tasks.append(
+            loop.run_in_executor(
+                None, fetch_live_chat, video_url, settings.auxiliary_max_chat_messages
+            )
+        )
+    else:
+        tasks.append(asyncio.Future())  # Placeholder
+        tasks[-1].set_result(None)
+
+    if "comments" in enabled:
+        tasks.append(
+            loop.run_in_executor(
+                None, fetch_top_comments, video_url, settings.auxiliary_max_comments
+            )
+        )
+    else:
+        tasks.append(asyncio.Future())  # Placeholder
+        tasks[-1].set_result(None)
 
     try:
         captions, live_chat, comments = await asyncio.wait_for(
-            asyncio.gather(captions_task, live_chat_task, comments_task),
-            timeout=timeout_seconds,
+            asyncio.gather(*tasks),
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         logger.warning("Auxiliary data fetching timed out")
         # Cancel any remaining tasks
-        for task in (captions_task, live_chat_task, comments_task):
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        # Use whatever finished before timeout
-        captions = captions_task.result() if captions_task.done() else None
-        live_chat = live_chat_task.result() if live_chat_task.done() else None
-        comments = comments_task.result() if comments_task.done() else None
+        # Use whatever finished before timeout (safely handle CancelledError)
+        captions = _task_result(tasks[0])
+        live_chat = _task_result(tasks[1])
+        comments = _task_result(tasks[2])
 
     context = build_auxiliary_context(video_url, captions, comments, live_chat)
     logger.info(
