@@ -109,6 +109,30 @@ class Settings(BaseSettings):
         default="youtube-ask-proxy", description="Default model name for API"
     )
 
+    # Gemini API
+    gemini_api_key: str | None = Field(
+        default=None, description="Google Gemini API key for video summarization"
+    )
+    gemini_model: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model name (e.g. gemini-2.0-flash, gemini-1.5-flash)",
+    )
+    gemini_temperature: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="Gemini generation temperature"
+    )
+    gemini_top_p: float = Field(
+        default=0.95, ge=0.0, le=1.0, description="Gemini top-p sampling"
+    )
+    gemini_max_output_tokens: int = Field(
+        default=8192, ge=1, le=8192, description="Gemini max output tokens"
+    )
+    gemini_timeout: int = Field(
+        default=120000, ge=5000, description="Gemini API timeout in ms"
+    )
+    gemini_enabled: bool = Field(
+        default=True, description="Enable Gemini API summarization (primary method)"
+    )
+
     # Prompting
     prompt_template: str | None = Field(
         default=None,

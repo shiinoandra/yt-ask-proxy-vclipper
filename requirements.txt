@@ -10,6 +10,7 @@ structlog>=24.1.0
 tenacity>=8.2.3
 orjson>=3.9.15
 aiofiles>=23.2.1
+google-genai>=1.2.0
 pytest>=8.1.0
 pytest-asyncio>=0.23.5
 pytest-playwright>=0.4.4
