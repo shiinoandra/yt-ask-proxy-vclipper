@@ -114,8 +114,8 @@ class Settings(BaseSettings):
         default=None, description="Google Gemini API key for video summarization"
     )
     gemini_model: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model name (e.g. gemini-2.0-flash, gemini-1.5-flash)",
+        default="gemini-2.5-flash",
+        description="Gemini model name (e.g. gemini-2.5-flash, gemini-3.1-flash-lite-preview)",
     )
     gemini_temperature: float = Field(
         default=1.0, ge=0.0, le=2.0, description="Gemini generation temperature"

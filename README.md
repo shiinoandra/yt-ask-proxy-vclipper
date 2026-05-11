@@ -403,7 +403,7 @@ All settings are loaded from environment variables or a `.env` file in the proje
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | `None` | **Google Gemini API key** (get one at [aistudio.google.com](https://aistudio.google.com)). When set, Gemini becomes the primary summarization engine. |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Model name (e.g., `gemini-2.0-flash`, `gemini-1.5-flash`) |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Model name (e.g., `gemini-2.5-flash`, `gemini-3.1-flash-lite-preview`) |
 | `GEMINI_TEMPERATURE` | `1.0` | Sampling temperature (0.0–2.0) |
 | `GEMINI_TOP_P` | `0.95` | Nucleus sampling (0.0–1.0) |
 | `GEMINI_MAX_OUTPUT_TOKENS` | `8192` | Max tokens in response |
