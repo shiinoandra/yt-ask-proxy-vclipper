@@ -223,8 +223,14 @@ async def summarize_with_text_llm(
     """Summarize video using only text data via an LLM.
 
     Tries providers in order:
-        1. Gemini API (if configured)
-        2. OpenAI-compatible API (if configured)
+        1. OpenAI-compatible API (default: local server at localhost:7860)
+        2. Gemini API (fallback)
+
+    Override via environment variables:
+        - OPENAI_BASE_URL (default: http://localhost:7860/v1)
+        - OPENAI_API_KEY  (default: not-needed)
+        - OPENAI_MODEL    (default: local-model)
+        - GEMINI_API_KEY  (fallback, only used if local server fails)
 
     Args:
         base_prompt: The original prompt template (e.g. VTuber analysis).
@@ -239,25 +245,26 @@ async def summarize_with_text_llm(
     """
     prompt = _build_text_prompt(base_prompt, auxiliary_text)
 
-    # Strategy 1: Gemini API
+    # Strategy 1: OpenAI-compatible API (local server by default)
+    if settings.openai_base_url:
+        try:
+            return await _call_openai_compatible_text(prompt)
+        except TextLLMGenerationError:
+            logger.warning("OpenAI-compatible text summarization failed, trying Gemini")
+        except Exception as exc:
+            logger.warning("Unexpected OpenAI-compatible error", error=str(exc))
+
+    # Strategy 2: Gemini API (fallback)
     if settings.gemini_api_key:
         try:
             return await _call_gemini_text(prompt)
         except TextLLMGenerationError:
-            logger.warning("Gemini text summarization failed, trying OpenAI-compatible")
+            logger.warning("Gemini text summarization failed")
         except Exception as exc:
             logger.warning("Unexpected Gemini text error", error=str(exc))
 
-    # Strategy 2: OpenAI-compatible API
-    if settings.openai_base_url and settings.openai_api_key:
-        try:
-            return await _call_openai_compatible_text(prompt)
-        except TextLLMGenerationError:
-            logger.warning("OpenAI-compatible text summarization failed")
-        except Exception as exc:
-            logger.warning("Unexpected OpenAI-compatible error", error=str(exc))
-
     raise TextLLMNotConfiguredError(
         "No text LLM provider succeeded. "
-        "Configure GEMINI_API_KEY or OPENAI_BASE_URL + OPENAI_API_KEY."
+        "Check that your local server is running at OPENAI_BASE_URL, "
+        "or configure GEMINI_API_KEY as a fallback."
     )

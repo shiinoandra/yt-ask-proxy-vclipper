@@ -133,15 +133,18 @@ class Settings(BaseSettings):
         default=True, description="Enable Gemini API summarization (fallback method)"
     )
 
-    # OpenAI-compatible API (optional, for text-based auxiliary summarization)
+    # OpenAI-compatible API (default: local server for auxiliary summarization)
     openai_base_url: str | None = Field(
-        default=None, description="Base URL for OpenAI-compatible API (e.g. https://api.openai.com/v1)"
+        default="http://localhost:7860/v1",
+        description="Base URL for OpenAI-compatible API. Default points to a local server.",
     )
     openai_api_key: str | None = Field(
-        default=None, description="API key for OpenAI-compatible API"
+        default="not-needed",
+        description="API key for OpenAI-compatible API. Use 'not-needed' for local servers without auth.",
     )
     openai_model: str | None = Field(
-        default=None, description="Model name for OpenAI-compatible API (e.g. gpt-4o-mini)"
+        default="local-model",
+        description="Model name for OpenAI-compatible API (e.g. local-model, gpt-4o-mini)",
     )
     openai_temperature: float = Field(
         default=1.0, ge=0.0, le=2.0, description="Temperature for OpenAI-compatible API"
