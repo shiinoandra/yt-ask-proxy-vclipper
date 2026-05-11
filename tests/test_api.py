@@ -34,11 +34,13 @@ class TestChatCompletions:
         error = response.json()["error"]
         assert "video url" in error["message"].lower()
 
+    @patch("youtube_ask_proxy.api._summarize_with_auxiliary")
     @patch("youtube_ask_proxy.api._summarize_with_playwright")
     def test_with_video_url_in_message(
-        self, mock_playwright: AsyncMock, client: TestClient
+        self, mock_playwright: AsyncMock, mock_aux: AsyncMock, client: TestClient
     ) -> None:
         mock_playwright.return_value = {"response": "This is a summary."}
+        mock_aux.return_value = None
 
         payload = {
             "model": "youtube-ask-proxy",
@@ -57,9 +59,13 @@ class TestChatCompletions:
         assert "This is a summary." in data["choices"][0]["message"]["content"]
         mock_playwright.assert_called_once()
 
+    @patch("youtube_ask_proxy.api._summarize_with_auxiliary")
     @patch("youtube_ask_proxy.api._summarize_with_playwright")
-    def test_stream_response(self, mock_playwright: AsyncMock, client: TestClient) -> None:
+    def test_stream_response(
+        self, mock_playwright: AsyncMock, mock_aux: AsyncMock, client: TestClient
+    ) -> None:
         mock_playwright.return_value = {"response": "Streamed result."}
+        mock_aux.return_value = None
 
         payload = {
             "model": "youtube-ask-proxy",
@@ -79,14 +85,20 @@ class TestChatCompletions:
         assert "[DONE]" in text
         mock_playwright.assert_called_once()
 
+    @patch("youtube_ask_proxy.api._summarize_with_auxiliary")
     @patch("youtube_ask_proxy.api._summarize_with_gemini")
     @patch("youtube_ask_proxy.api._summarize_with_playwright")
     def test_fallback_to_gemini(
-        self, mock_playwright: AsyncMock, mock_gemini: AsyncMock, client: TestClient
+        self,
+        mock_playwright: AsyncMock,
+        mock_gemini: AsyncMock,
+        mock_aux: AsyncMock,
+        client: TestClient,
     ) -> None:
         """Test that Gemini is used when Playwright fails."""
         mock_playwright.return_value = None  # Playwright fails
         mock_gemini.return_value = {"response": "Gemini fallback result."}
+        mock_aux.return_value = None
 
         payload = {
             "model": "youtube-ask-proxy",
@@ -104,14 +116,52 @@ class TestChatCompletions:
         mock_playwright.assert_called_once()
         mock_gemini.assert_called_once()
 
+    @patch("youtube_ask_proxy.api._summarize_with_auxiliary")
     @patch("youtube_ask_proxy.api._summarize_with_gemini")
     @patch("youtube_ask_proxy.api._summarize_with_playwright")
-    def test_both_methods_fail_gracefully(
-        self, mock_playwright: AsyncMock, mock_gemini: AsyncMock, client: TestClient
+    def test_fallback_to_auxiliary(
+        self,
+        mock_playwright: AsyncMock,
+        mock_gemini: AsyncMock,
+        mock_aux: AsyncMock,
+        client: TestClient,
     ) -> None:
-        """Test graceful degradation when both methods fail."""
+        """Test that auxiliary text is used when both Playwright and Gemini fail."""
         mock_playwright.return_value = None
         mock_gemini.return_value = None
+        mock_aux.return_value = {"response": "Auxiliary fallback result."}
+
+        payload = {
+            "model": "youtube-ask-proxy",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                }
+            ],
+        }
+        response = client.post("/v1/chat/completions", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert "Auxiliary fallback result." in data["choices"][0]["message"]["content"]
+        mock_playwright.assert_called_once()
+        mock_gemini.assert_called_once()
+        mock_aux.assert_called_once()
+
+    @patch("youtube_ask_proxy.api._summarize_with_auxiliary")
+    @patch("youtube_ask_proxy.api._summarize_with_gemini")
+    @patch("youtube_ask_proxy.api._summarize_with_playwright")
+    def test_all_methods_fail_gracefully(
+        self,
+        mock_playwright: AsyncMock,
+        mock_gemini: AsyncMock,
+        mock_aux: AsyncMock,
+        client: TestClient,
+    ) -> None:
+        """Test graceful degradation when all methods fail."""
+        mock_playwright.return_value = None
+        mock_gemini.return_value = None
+        mock_aux.return_value = None
 
         payload = {
             "model": "youtube-ask-proxy",

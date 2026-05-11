@@ -130,7 +130,27 @@ class Settings(BaseSettings):
         default=120000, ge=5000, description="Gemini API timeout in ms"
     )
     gemini_enabled: bool = Field(
-        default=True, description="Enable Gemini API summarization (primary method)"
+        default=True, description="Enable Gemini API summarization (fallback method)"
+    )
+
+    # OpenAI-compatible API (optional, for text-based auxiliary summarization)
+    openai_base_url: str | None = Field(
+        default=None, description="Base URL for OpenAI-compatible API (e.g. https://api.openai.com/v1)"
+    )
+    openai_api_key: str | None = Field(
+        default=None, description="API key for OpenAI-compatible API"
+    )
+    openai_model: str | None = Field(
+        default=None, description="Model name for OpenAI-compatible API (e.g. gpt-4o-mini)"
+    )
+    openai_temperature: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="Temperature for OpenAI-compatible API"
+    )
+    openai_max_tokens: int = Field(
+        default=8192, ge=1, description="Max output tokens for OpenAI-compatible API"
+    )
+    openai_timeout: int = Field(
+        default=120000, ge=5000, description="Timeout for OpenAI-compatible API in ms"
     )
 
     # Prompting

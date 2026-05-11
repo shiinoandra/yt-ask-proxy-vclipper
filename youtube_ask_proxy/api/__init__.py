@@ -1,5 +1,6 @@
 """OpenAI-compatible FastAPI application."""
 
+import asyncio
 import json
 import time
 import uuid
@@ -18,11 +19,18 @@ from youtube_ask_proxy.browser import (
     ResponseTimeoutError,
 )
 from youtube_ask_proxy.config import settings
+from youtube_ask_proxy.enrichment import is_empty_or_error, merge_responses
 from youtube_ask_proxy.gemini import (
     GeminiAPIError,
     GeminiNotConfiguredError,
     GeminiSummarizationError,
     summarize_video,
+)
+from youtube_ask_proxy.llm_client import (
+    TextLLMError,
+    TextLLMGenerationError,
+    TextLLMNotConfiguredError,
+    summarize_with_text_llm,
 )
 from youtube_ask_proxy.logging import configure_logging, get_logger
 from youtube_ask_proxy.models import (
@@ -99,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="YouTube Ask Proxy API",
-    description="OpenAI-compatible API proxy for YouTube video summarization via YouTube Ask browser automation (primary) and Gemini API (fallback).",
+    description="OpenAI-compatible API proxy for YouTube video summarization via YouTube Ask browser automation (primary), Gemini API (fallback), and auxiliary text data (enrichment).",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -145,6 +153,20 @@ async def gemini_error_handler(request: Request, exc: GeminiAPIError) -> JSONRes
         message=str(exc),
         type="gemini_api_error",
         code="gemini_error",
+    )
+    return JSONResponse(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        content=APIErrorResponse(error=error_detail).model_dump(),
+    )
+
+
+@app.exception_handler(TextLLMError)
+async def text_llm_error_handler(request: Request, exc: TextLLMError) -> JSONResponse:
+    logger.error("Text LLM error", error=str(exc), path=request.url.path)
+    error_detail = APIErrorDetail(
+        message=str(exc),
+        type="text_llm_error",
+        code="text_llm_error",
     )
     return JSONResponse(
         status_code=status.HTTP_502_BAD_GATEWAY,
@@ -222,14 +244,14 @@ def _build_unavailable_response(
     model: str,
     prompt: str,
 ) -> ChatCompletionResponse:
-    """Build a graceful 'unavailable' response when both methods fail."""
+    """Build a graceful 'unavailable' response when all methods fail."""
     fallback_content = {
         "error": True,
         "message": "Summarization is not available for this video.",
         "details": (
             "The video may not be accessible, the Ask feature is not enabled, "
-            "or the service is temporarily unavailable. Please try again later "
-            "or with a different video."
+            "captions/comments are unavailable, and no LLM provider is configured. "
+            "Please try again later or with a different video."
         ),
     }
     return _build_completion_response(fallback_content, model, prompt)
@@ -286,6 +308,63 @@ async def _summarize_with_gemini(
         return None
 
 
+async def _summarize_with_auxiliary(
+    video_url: str,
+    prompt: str,
+) -> dict[str, object] | None:
+    """Download captions/comments/chat and send to a text LLM.
+
+    Returns None if no auxiliary data is available or all text LLMs fail.
+    """
+    try:
+        from youtube_ask_proxy.auxiliary import fetch_all_auxiliary_data
+
+        logger.info("Trying auxiliary text enrichment", video_url=video_url)
+        aux_context = fetch_all_auxiliary_data(video_url)
+
+        if not aux_context["available_sources"]:
+            logger.warning("No auxiliary data available for this video")
+            return None
+
+        logger.info(
+            "Sending auxiliary data to text LLM",
+            sources=aux_context["available_sources"],
+            chars=aux_context["total_chars"],
+        )
+
+        result = await summarize_with_text_llm(prompt, aux_context["text"])
+        logger.info("Auxiliary text summarization succeeded")
+
+        # Mark the response so callers know it came from text-only data
+        result["_source"] = "auxiliary_text"
+        result["_auxiliary_sources"] = aux_context["available_sources"]
+        return result
+
+    except TextLLMNotConfiguredError as exc:
+        logger.warning("No text LLM configured for auxiliary", error=str(exc))
+        return None
+    except TextLLMGenerationError as exc:
+        logger.warning("Text LLM generation failed", error=str(exc))
+        return None
+    except Exception as exc:
+        logger.warning("Unexpected auxiliary error", error=str(exc))
+        return None
+
+
+async def _resolve_base_result(video_url: str, prompt: str) -> dict[str, object] | None:
+    """Get the best base result from Playwright or Gemini.
+
+    Tries Playwright first. If it fails, falls back to Gemini.
+    """
+    result = await _summarize_with_playwright(video_url, prompt)
+    if result is not None:
+        return result
+
+    logger.info("Playwright failed, falling back to Gemini API")
+    result = await _summarize_with_gemini(video_url, prompt)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -316,10 +395,13 @@ async def create_chat_completion(
     """Create a chat completion (OpenAI-compatible).
 
     Strategy:
-        1. Try Playwright / YouTube Ask first (fast, high-quality, ~10-20s).
-        2. If Playwright fails (Ask not available, timeout, auth issue),
-           fall back to Gemini API.
-        3. If both fail, return a graceful "unavailable" message.
+        1. Playwright / YouTube Ask (primary, ~10-20s).
+        2. If Playwright fails, Gemini API video summarization (fallback).
+        3. Auxiliary text data (captions, comments, live chat) is ALWAYS
+           sent to a text LLM for additional context.
+        4. If both a base result (Playwright/Gemini) and auxiliary result
+           exist, they are MERGED into a single enriched response.
+        5. If all methods fail, return a graceful "unavailable" message.
     """
     prompt, video_url = build_ask_prompt(request.messages, request.video_url)
 
@@ -336,17 +418,30 @@ async def create_chat_completion(
             media_type="text/event-stream",
         )
 
-    # Phase 1: Playwright / YouTube Ask (primary)
-    result = await _summarize_with_playwright(video_url, prompt)
+    # Launch both tasks in parallel:
+    # - Base summarization (Playwright → Gemini fallback)
+    # - Auxiliary text enrichment (always runs)
+    base_task = asyncio.create_task(_resolve_base_result(video_url, prompt))
+    aux_task = asyncio.create_task(_summarize_with_auxiliary(video_url, prompt))
 
-    # Phase 2: Gemini API fallback
-    if result is None:
-        logger.info("Playwright failed, falling back to Gemini API")
-        result = await _summarize_with_gemini(video_url, prompt)
+    base_result = await base_task
+    aux_result = await aux_task
 
-    # Phase 3: Graceful degradation
-    if result is None:
-        logger.error("Both Playwright and Gemini failed; returning unavailable response")
+    # Determine final result
+    if base_result is not None and aux_result is not None:
+        # Enrichment: merge auxiliary into base
+        logger.info("Merging base result with auxiliary enrichment")
+        result = merge_responses(base_result, aux_result, enrichment_mode=True)
+    elif base_result is not None:
+        # Only base succeeded
+        result = base_result
+    elif aux_result is not None:
+        # Only auxiliary succeeded (last-resort fallback)
+        logger.info("Using auxiliary result as standalone fallback")
+        result = aux_result
+    else:
+        # All methods failed
+        logger.error("All methods failed; returning unavailable response")
         return _build_unavailable_response(request.model or settings.default_model, prompt)
 
     return _build_completion_response(result, request.model or settings.default_model, prompt)
@@ -359,25 +454,31 @@ async def _stream_chat_completion(
 ) -> AsyncIterator[str]:
     """Stream chat completion responses as Server-Sent Events.
 
-    Note: Since neither YouTube Ask nor Gemini natively stream tokens,
+    Note: Since none of the engines natively stream tokens,
     we simulate streaming by yielding the full response as a single chunk.
     """
-    result = await _summarize_with_playwright(video_url, prompt)
-    method = "playwright"
+    # For streaming we still run both in parallel, but we can't yield until
+    # both are done because we need to merge them.
+    base_task = asyncio.create_task(_resolve_base_result(video_url, prompt))
+    aux_task = asyncio.create_task(_summarize_with_auxiliary(video_url, prompt))
 
-    if result is None:
-        logger.info("Playwright failed, falling back to Gemini API (stream)")
-        result = await _summarize_with_gemini(video_url, prompt)
-        method = "gemini"
+    base_result = await base_task
+    aux_result = await aux_task
 
-    if result is None:
-        logger.error("Both methods failed; returning unavailable response (stream)")
+    if base_result is not None and aux_result is not None:
+        result = merge_responses(base_result, aux_result, enrichment_mode=True)
+    elif base_result is not None:
+        result = base_result
+    elif aux_result is not None:
+        result = aux_result
+    else:
         result = {
             "error": True,
             "message": "Summarization is not available for this video.",
             "details": (
                 "The video may not be accessible, the Ask feature is not enabled, "
-                "or the service is temporarily unavailable."
+                "captions/comments are unavailable, or the service is temporarily "
+                "unavailable."
             ),
         }
 
