@@ -7,6 +7,7 @@ extraction, then merged into the final response.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -213,7 +214,7 @@ def fetch_live_chat(video_url: str, max_messages: int = 500) -> str | None:
         return None
 
 
-def fetch_top_comments(video_url: str, max_comments: int = 100) -> str | None:
+def fetch_top_comments(video_url: str, max_comments: int = 30) -> str | None:
     """Fetch top-level comments for a YouTube video.
 
     Args:
@@ -312,23 +313,52 @@ def build_auxiliary_context(
     }
 
 
-def fetch_all_auxiliary_data(video_url: str) -> dict[str, Any]:
+async def fetch_all_auxiliary_data(
+    video_url: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
     """Fetch all available auxiliary data for a video.
 
     This is a convenience wrapper that attempts to download captions,
     live chat, and comments, then builds a unified context object.
 
+    All blocking I/O (yt_dlp) is offloaded to threads so the asyncio
+    event loop is not blocked.
+
     Args:
         video_url: YouTube video URL.
+        timeout_seconds: Max time to wait for all auxiliary downloads.
 
     Returns:
         Context dict from :func:`build_auxiliary_context`.
     """
-    logger.info("Fetching auxiliary data", video_url=video_url)
+    logger.info(
+        "Fetching auxiliary data",
+        video_url=video_url,
+        timeout_seconds=timeout_seconds,
+    )
 
-    captions = fetch_captions(video_url)
-    live_chat = fetch_live_chat(video_url)
-    comments = fetch_top_comments(video_url)
+    # Run blocking functions in threads so the event loop stays free
+    loop = asyncio.get_event_loop()
+    captions_task = loop.run_in_executor(None, fetch_captions, video_url)
+    live_chat_task = loop.run_in_executor(None, fetch_live_chat, video_url)
+    comments_task = loop.run_in_executor(None, fetch_top_comments, video_url)
+
+    try:
+        captions, live_chat, comments = await asyncio.wait_for(
+            asyncio.gather(captions_task, live_chat_task, comments_task),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Auxiliary data fetching timed out")
+        # Cancel any remaining tasks
+        for task in (captions_task, live_chat_task, comments_task):
+            if not task.done():
+                task.cancel()
+        # Use whatever finished before timeout
+        captions = captions_task.result() if captions_task.done() else None
+        live_chat = live_chat_task.result() if live_chat_task.done() else None
+        comments = comments_task.result() if comments_task.done() else None
 
     context = build_auxiliary_context(video_url, captions, comments, live_chat)
     logger.info(

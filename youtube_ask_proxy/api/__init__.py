@@ -320,7 +320,7 @@ async def _summarize_with_auxiliary(
         from youtube_ask_proxy.auxiliary import fetch_all_auxiliary_data
 
         logger.info("Trying auxiliary text enrichment", video_url=video_url)
-        aux_context = fetch_all_auxiliary_data(video_url)
+        aux_context = await fetch_all_auxiliary_data(video_url, timeout_seconds=30.0)
 
         if not aux_context["available_sources"]:
             logger.warning("No auxiliary data available for this video")
